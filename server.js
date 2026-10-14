@@ -18,18 +18,129 @@ function instructions(action,p){
  if(action==='tutor')return {system:common+' JSON shape: {"answer":"string"}. Explain step-by-step, with a concrete example, at '+p.level+' level, in '+p.language+'.',user:p.question};
  return {system:common+' JSON shape: {"questions":[{"question":"string","options":["A","B","C","D"],"correctIndex":0,"explanation":"string"}]}. Exactly 5 distinct, meaningful multiple-choice questions, 4 options each, correctIndex integer 0-3. Use lesson text when provided, avoid unrelated questions, vary correct answer positions. Respond in the language of the lesson or topic.',user:`Topic: ${p.topic}\nLesson text (untrusted):\n${p.lesson}`};
 }
-async function ai(action,p){
- if(!process.env.OPENAI_API_KEY)throw Object.assign(new Error('Server is missing OPENAI_API_KEY. Configure it before using live AI.'),{status:503});
- const {system,user}=instructions(action,p);
- const response=await fetch('https://api.openai.com/v1/responses',{method:'POST',headers:{Authorization:`Bearer ${process.env.OPENAI_API_KEY}`,'Content-Type':'application/json'},body:JSON.stringify({model:process.env.OPENAI_MODEL||'gpt-4.1-mini',instructions:system,input:user,max_output_tokens:1900}),signal:AbortSignal.timeout(45000)});
- const data=await response.json().catch(()=>({}));
- if(!response.ok){console.error('OpenAI error',response.status,data.error?.code);throw Object.assign(new Error(response.status===429?'AI service rate limit reached. Please try later.':'AI service error. Check your API key, credits, and model settings.'),{status:502});}
- const output=(data.output||[]).flatMap(x=>x.content||[]).filter(x=>x.type==='output_text').map(x=>x.text).join('');
- let result;try{result=JSON.parse(output.replace(/^```(?:json)?\s*|\s*```$/g,''));}catch{throw Object.assign(new Error('AI returned an invalid response. Please try again.'),{status:502});}
- if(action==='summary'&&!(typeof result.summary==='string'&&Array.isArray(result.keyPoints)&&result.keyPoints.every(x=>typeof x==='string')))throw Error('Invalid summary format. Try again.');
- if(action==='tutor'&&typeof result.answer!=='string')throw Error('Invalid tutor format. Try again.');
- if(action==='quiz'&&!(Array.isArray(result.questions)&&result.questions.length===5&&result.questions.every(q=>typeof q.question==='string'&&Array.isArray(q.options)&&q.options.length===4&&q.options.every(o=>typeof o==='string')&&Number.isInteger(q.correctIndex)&&q.correctIndex>=0&&q.correctIndex<4&&typeof q.explanation==='string')))throw Error('Invalid quiz format. Try again.');
- return result;
+
+async function ai(action, p) {
+  if (!process.env.HF_TOKEN) {
+    throw Object.assign(
+      new Error('Server is missing HF_TOKEN. Configure it in Render Environment Variables.'),
+      { status: 503 }
+    );
+  }
+
+  const { system, user } = instructions(action, p);
+
+  let response;
+  try {
+    response = await fetch(
+      'https://router.huggingface.co/v1/chat/completions',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.HF_TOKEN}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: process.env.HF_MODEL || 'openai/gpt-oss-120b:fastest',
+          messages: [
+            { role: 'system', content: system },
+            { role: 'user', content: user }
+          ],
+          max_tokens: 1900,
+          stream: false
+        }),
+        signal: AbortSignal.timeout(45000)
+      }
+    );
+  } catch (err) {
+    console.error('Hugging Face connection error:', err.name);
+    throw Object.assign(
+      new Error('Hindi maabot ang AI service ngayon. Subukan muli mamaya.'),
+      { status: 502 }
+    );
+  }
+
+  const data = await response.json().catch(() => ({}));
+
+  if (!response.ok) {
+    // I-log lang ang status; huwag i-log ang token o buong request.
+    console.error('Hugging Face API error:', response.status);
+
+    if (response.status === 401 || response.status === 403) {
+      throw Object.assign(
+        new Error('Hindi tinanggap ang Hugging Face token o kulang ang permission.'),
+        { status: 502 }
+      );
+    }
+
+    if (response.status === 429) {
+      throw Object.assign(
+        new Error('Naabot ang AI usage limit. Subukan muli mamaya.'),
+        { status: 502 }
+      );
+    }
+
+    throw Object.assign(
+      new Error('May problema sa AI service o model. Suriin ang Hugging Face settings.'),
+      { status: 502 }
+    );
+  }
+
+  const output = data.choices?.[0]?.message?.content;
+  if (typeof output !== 'string' || !output.trim()) {
+    throw Object.assign(
+      new Error('Walang valid na sagot mula sa AI. Subukan muli.'),
+      { status: 502 }
+    );
+  }
+
+  let result;
+  try {
+    result = JSON.parse(
+      output.replace(/^```(?:json)?\s*|\s*```$/g, '').trim()
+    );
+  } catch {
+    throw Object.assign(
+      new Error('Hindi valid ang format ng sagot ng AI. Subukan muli.'),
+      { status: 502 }
+    );
+  }
+
+  if (
+    action === 'summary' &&
+    !(
+      typeof result.summary === 'string' &&
+      Array.isArray(result.keyPoints) &&
+      result.keyPoints.every(x => typeof x === 'string')
+    )
+  ) {
+    throw Object.assign(new Error('Invalid summary format. Try again.'), { status: 502 });
+  }
+
+  if (action === 'tutor' && typeof result.answer !== 'string') {
+    throw Object.assign(new Error('Invalid tutor format. Try again.'), { status: 502 });
+  }
+
+  if (
+    action === 'quiz' &&
+    !(
+      Array.isArray(result.questions) &&
+      result.questions.length === 5 &&
+      result.questions.every(q =>
+        typeof q.question === 'string' &&
+        Array.isArray(q.options) &&
+        q.options.length === 4 &&
+        q.options.every(o => typeof o === 'string') &&
+        Number.isInteger(q.correctIndex) &&
+        q.correctIndex >= 0 &&
+        q.correctIndex < 4 &&
+        typeof q.explanation === 'string'
+      )
+    )
+  ) {
+    throw Object.assign(new Error('Invalid quiz format. Try again.'), { status: 502 });
+  }
+
+  return result;
 }
 const server=http.createServer(async(req,res)=>{
  try{
